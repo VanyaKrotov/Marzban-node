@@ -1,0 +1,4 @@
+interface:
+  display_name: "Marzban Node Xray Core"
+  short_description: "Safely change Xray config and process lifecycle"
+  default_prompt: "Use $marzban-node-xray-core to implement and verify an Xray core or configuration change."

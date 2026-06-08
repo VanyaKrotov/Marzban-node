@@ -1,0 +1,4 @@
+interface:
+  display_name: "Marzban Node Operations"
+  short_description: "Maintain configuration, containers, and releases"
+  default_prompt: "Use $marzban-node-operations to update deployment, environment, or release behavior safely."

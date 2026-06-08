@@ -1,0 +1,4 @@
+interface:
+  display_name: "Marzban Node Services"
+  short_description: "Maintain REST and RPyC control contracts"
+  default_prompt: "Use $marzban-node-services to change a node control endpoint while preserving protocol behavior."
