@@ -9,8 +9,10 @@ services:
     environment:
       SSL_CERT_FILE: "/var/lib/marzban-node/ssl_cert.pem"
       SSL_KEY_FILE: "/var/lib/marzban-node/ssl_key.pem"
+      CERTIFICATES_DIR: "/var/lib/marzban-node/certificates"
       # SSL_CLIENT_CERT_FILE: "/var/lib/marzban-node/ssl_client_cert.pem"
       # SERVICE_PROTOCOL: "rest"
 
     volumes:
+      # Includes issued certificates and acme.sh state.
       - /var/lib/marzban-node:/var/lib/marzban-node

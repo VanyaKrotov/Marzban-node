@@ -15,6 +15,18 @@ SSL_CERT_FILE = config("SSL_CERT_FILE", default="/var/lib/marzban-node/ssl_cert.
 SSL_KEY_FILE = config("SSL_KEY_FILE", default="/var/lib/marzban-node/ssl_key.pem")
 SSL_CLIENT_CERT_FILE = config("SSL_CLIENT_CERT_FILE", default="")
 
+CERTIFICATES_DIR = config(
+    "CERTIFICATES_DIR",
+    default="/var/lib/marzban-node/certificates"
+)
+ACME_SH_PATH = config("ACME_SH_PATH", default="/usr/local/bin/acme.sh")
+ACME_TIMEOUT = config("ACME_TIMEOUT", cast=int, default=300)
+ACME_RENEW_BEFORE_DAYS = config(
+    "ACME_RENEW_BEFORE_DAYS",
+    cast=int,
+    default=30
+)
+
 DEBUG = config("DEBUG", cast=bool, default=False)
 
 SERVICE_PROTOCOL = config('SERVICE_PROTOCOL', cast=str, default='rest')

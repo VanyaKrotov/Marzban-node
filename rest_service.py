@@ -10,6 +10,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.websockets import WebSocketDisconnect
 
+from certificate_service import (CertificateServiceError, certificate_manager)
 from config import XRAY_ASSETS_PATH, XRAY_EXECUTABLE_PATH
 from logger import logger
 from xray import XRayConfig, XRayCore
@@ -49,6 +50,11 @@ class Service(object):
         self.router.add_api_route("/start", self.start, methods=["POST"])
         self.router.add_api_route("/stop", self.stop, methods=["POST"])
         self.router.add_api_route("/restart", self.restart, methods=["POST"])
+        self.router.add_api_route(
+            "/certificates/issue",
+            self.issue_certificate,
+            methods=["POST"]
+        )
 
         self.router.add_websocket_route("/logs", self.logs)
 
@@ -209,6 +215,29 @@ class Service(object):
             )
 
         return self.response()
+
+    def issue_certificate(
+        self,
+        session_id: UUID = Body(embed=True),
+        domain: str = Body(embed=True),
+        email: str | None = Body(default=None, embed=True),
+        staging: bool = Body(default=False, embed=True),
+        force: bool = Body(default=False, embed=True),
+    ):
+        self.match_session_id(session_id)
+
+        try:
+            return certificate_manager.issue_certificate(
+                domain=domain,
+                email=email,
+                staging=staging,
+                force=force,
+            )
+        except CertificateServiceError as exc:
+            raise HTTPException(
+                status_code=exc.status_code,
+                detail=str(exc),
+            ) from exc
 
     async def logs(self, websocket: WebSocket):
         session_id = websocket.query_params.get('session_id')

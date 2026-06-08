@@ -4,6 +4,7 @@ from threading import Thread
 
 import rpyc
 
+from certificate_service import certificate_manager
 from config import XRAY_ASSETS_PATH, XRAY_EXECUTABLE_PATH
 from logger import logger
 from xray import XRayConfig, XRayCore
@@ -133,6 +134,24 @@ class XrayService(rpyc.Service):
             raise ProcessLookupError("Xray has not been started")
 
         return self.core.version
+
+    @rpyc.exposed
+    def issue_certificate(
+        self,
+        domain: str,
+        email: str = None,
+        staging: bool = False,
+        force: bool = False
+    ):
+        if self.connection is None:
+            raise ConnectionError("Controller is not connected")
+
+        return certificate_manager.issue_certificate(
+            domain=domain,
+            email=email,
+            staging=staging,
+            force=force,
+        )
 
     @rpyc.exposed
     def fetch_logs(self, callback: callable) -> XrayCoreLogsHandler:
