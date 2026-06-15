@@ -12,6 +12,7 @@ from starlette.websockets import WebSocketDisconnect
 
 from certificate_service import (CertificateServiceError, certificate_manager)
 from config import XRAY_ASSETS_PATH, XRAY_EXECUTABLE_PATH
+from geo_resource_service import (GeoResourceError, geo_resource_manager)
 from logger import logger
 from xray import XRayConfig, XRayCore
 
@@ -53,6 +54,31 @@ class Service(object):
         self.router.add_api_route(
             "/certificates/issue",
             self.issue_certificate,
+            methods=["POST"]
+        )
+        self.router.add_api_route(
+            "/geo-resources",
+            self.list_geo_resources,
+            methods=["POST"]
+        )
+        self.router.add_api_route(
+            "/geo-resources/upload",
+            self.upload_geo_resource,
+            methods=["POST"]
+        )
+        self.router.add_api_route(
+            "/geo-resources/download",
+            self.download_geo_resource,
+            methods=["POST"]
+        )
+        self.router.add_api_route(
+            "/geo-resources/rename",
+            self.rename_geo_resource,
+            methods=["POST"]
+        )
+        self.router.add_api_route(
+            "/geo-resources/delete",
+            self.delete_geo_resources,
             methods=["POST"]
         )
 
@@ -234,6 +260,75 @@ class Service(object):
                 force=force,
             )
         except CertificateServiceError as exc:
+            raise HTTPException(
+                status_code=exc.status_code,
+                detail=str(exc),
+            ) from exc
+
+    def list_geo_resources(
+        self,
+        session_id: UUID = Body(embed=True),
+    ):
+        self.match_session_id(session_id)
+        return self._call_geo_resource(geo_resource_manager.list_resources)
+
+    def upload_geo_resource(
+        self,
+        session_id: UUID = Body(embed=True),
+        filename: str = Body(embed=True),
+        content: str = Body(embed=True),
+        overwrite: bool = Body(default=False, embed=True),
+    ):
+        self.match_session_id(session_id)
+        return self._call_geo_resource(
+            geo_resource_manager.upload_resource,
+            filename=filename,
+            content=content,
+            overwrite=overwrite,
+        )
+
+    def download_geo_resource(
+        self,
+        session_id: UUID = Body(embed=True),
+        filename: str = Body(embed=True),
+    ):
+        self.match_session_id(session_id)
+        return self._call_geo_resource(
+            geo_resource_manager.download_resource,
+            filename=filename,
+        )
+
+    def rename_geo_resource(
+        self,
+        session_id: UUID = Body(embed=True),
+        filename: str = Body(embed=True),
+        new_filename: str = Body(embed=True),
+        overwrite: bool = Body(default=False, embed=True),
+    ):
+        self.match_session_id(session_id)
+        return self._call_geo_resource(
+            geo_resource_manager.rename_resource,
+            filename=filename,
+            new_filename=new_filename,
+            overwrite=overwrite,
+        )
+
+    def delete_geo_resources(
+        self,
+        session_id: UUID = Body(embed=True),
+        filenames: list[str] = Body(embed=True),
+    ):
+        self.match_session_id(session_id)
+        return self._call_geo_resource(
+            geo_resource_manager.delete_resources,
+            filenames=filenames,
+        )
+
+    @staticmethod
+    def _call_geo_resource(operation, **kwargs):
+        try:
+            return operation(**kwargs)
+        except GeoResourceError as exc:
             raise HTTPException(
                 status_code=exc.status_code,
                 detail=str(exc),

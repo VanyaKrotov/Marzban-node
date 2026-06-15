@@ -27,5 +27,6 @@
 - Docker base: Python slim image, version selected by `PYTHON_VERSION`
 - Container command: `python main.py`
 - Compose uses `network_mode: host`
+- Compose persists `/usr/local/share/xray` in the `xray-assets` volume
 - systemd runs `/var/lib/marzban-node/main.py`
 - GitHub Actions publishes Docker Hub and GHCR images on version tags

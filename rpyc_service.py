@@ -6,6 +6,7 @@ import rpyc
 
 from certificate_service import certificate_manager
 from config import XRAY_ASSETS_PATH, XRAY_EXECUTABLE_PATH
+from geo_resource_service import geo_resource_manager
 from logger import logger
 from xray import XRayConfig, XRayCore
 
@@ -152,6 +153,53 @@ class XrayService(rpyc.Service):
             staging=staging,
             force=force,
         )
+
+    @rpyc.exposed
+    def list_geo_resources(self):
+        self._require_connection()
+        return geo_resource_manager.list_resources()
+
+    @rpyc.exposed
+    def upload_geo_resource(
+        self,
+        filename: str,
+        content: str,
+        overwrite: bool = False,
+    ):
+        self._require_connection()
+        return geo_resource_manager.upload_resource(
+            filename=filename,
+            content=content,
+            overwrite=overwrite,
+        )
+
+    @rpyc.exposed
+    def download_geo_resource(self, filename: str):
+        self._require_connection()
+        return geo_resource_manager.download_resource(filename)
+
+    @rpyc.exposed
+    def rename_geo_resource(
+        self,
+        filename: str,
+        new_filename: str,
+        overwrite: bool = False,
+    ):
+        self._require_connection()
+        return geo_resource_manager.rename_resource(
+            filename=filename,
+            new_filename=new_filename,
+            overwrite=overwrite,
+        )
+
+    @rpyc.exposed
+    def delete_geo_resources(self, filenames: list[str]):
+        self._require_connection()
+        return geo_resource_manager.delete_resources(filenames)
+
+    def _require_connection(self):
+        if self.connection is None:
+            raise ConnectionError("Controller is not connected")
 
     @rpyc.exposed
     def fetch_logs(self, callback: callable) -> XrayCoreLogsHandler:

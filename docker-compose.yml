@@ -7,6 +7,7 @@ services:
 
     # env_file: .env
     environment:
+      XRAY_ASSETS_PATH: "/usr/local/share/xray"
       SSL_CERT_FILE: "/var/lib/marzban-node/ssl_cert.pem"
       SSL_KEY_FILE: "/var/lib/marzban-node/ssl_key.pem"
       CERTIFICATES_DIR: "/var/lib/marzban-node/certificates"
@@ -16,3 +17,8 @@ services:
     volumes:
       # Includes issued certificates and acme.sh state.
       - /var/lib/marzban-node:/var/lib/marzban-node
+      # Persists Xray geoip.dat, geosite.dat, and custom geo-resources.
+      - xray-assets:/usr/local/share/xray
+
+volumes:
+  xray-assets:
