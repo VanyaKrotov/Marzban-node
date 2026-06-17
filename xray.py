@@ -32,17 +32,36 @@ class XRayConfig(dict):
         return json.dumps(self, **json_kwargs)
 
     def _apply_api(self):
-        for inbound in self.get('inbounds', []).copy():
-            if inbound.get('protocol') == 'dokodemo-door' and inbound.get('tag') == 'API_INBOUND':
-                self['inbounds'].remove(inbound)
-                
-            elif INBOUNDS and inbound.get('tag') not in INBOUNDS:
-                self['inbounds'].remove(inbound)
+        inbounds = self.get('inbounds')
+        if not isinstance(inbounds, list):
+            inbounds = []
 
-        for rule in self.get('routing', {}).get("rules", []):
-            api_tag = self.get('api', {}).get('tag')
-            if api_tag and rule.get('outboundTag') == api_tag:
-                self['routing']['rules'].remove(rule)
+        self['inbounds'] = [
+            inbound for inbound in inbounds
+            if isinstance(inbound, dict)
+            and not self._is_node_api_inbound(inbound)
+            and (not INBOUNDS or inbound.get('tag') in INBOUNDS)
+        ]
+
+        routing = self.get('routing')
+        if not isinstance(routing, dict):
+            routing = {}
+        self['routing'] = routing
+
+        rules = routing.get("rules")
+        if not isinstance(rules, list):
+            rules = []
+
+        api_tags = {"API"}
+        old_api_tag = self.get('api', {}).get('tag')
+        if old_api_tag:
+            api_tags.add(old_api_tag)
+
+        routing["rules"] = [
+            rule for rule in rules
+            if isinstance(rule, dict)
+            and not self._is_node_api_rule(rule, api_tags)
+        ]
 
         self["api"] = {
             "services": [
@@ -73,11 +92,7 @@ class XRayConfig(dict):
             },
             "tag": "API_INBOUND"
         }
-        try:
-            self["inbounds"].insert(0, inbound)
-        except KeyError:
-            self["inbounds"] = []
-            self["inbounds"].insert(0, inbound)
+        self["inbounds"].insert(0, inbound)
 
         rule = {
             "inboundTag": [
@@ -90,11 +105,25 @@ class XRayConfig(dict):
             "outboundTag": "API",
             "type": "field"
         }
-        try:
-            self["routing"]["rules"].insert(0, rule)
-        except KeyError:
-            self["routing"] = {"rules": []}
-            self["routing"]["rules"].insert(0, rule)
+        self["routing"]["rules"].insert(0, rule)
+
+    @staticmethod
+    def _is_node_api_inbound(inbound):
+        return (
+            inbound.get('protocol') == 'dokodemo-door'
+            and inbound.get('tag') == 'API_INBOUND'
+        )
+
+    @staticmethod
+    def _is_node_api_rule(rule, api_tags):
+        inbound_tags = rule.get('inboundTag', [])
+        if isinstance(inbound_tags, str):
+            inbound_tags = [inbound_tags]
+
+        return (
+            rule.get('outboundTag') in api_tags
+            and 'API_INBOUND' in inbound_tags
+        )
 
 
 class XRayCore:
