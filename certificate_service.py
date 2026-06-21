@@ -14,6 +14,7 @@ from cryptography.hazmat.primitives import serialization
 
 from config import (ACME_RENEW_BEFORE_DAYS, ACME_SH_PATH, ACME_TIMEOUT,
                     CERTIFICATES_DIR)
+from logger import logger
 
 
 CERTIFICATE_PATTERN = re.compile(
@@ -45,6 +46,59 @@ class CertificateTimeoutError(CertificateServiceError):
 
 class PortUnavailableError(CertificateServiceError):
     status_code = 503
+
+
+class NginxController:
+    def __init__(self, runner=None):
+        self.runner = runner or self._run_systemctl
+
+    def is_active(self) -> bool:
+        try:
+            completed = self.runner(["systemctl", "is-active", "--quiet", "nginx"])
+        except FileNotFoundError:
+            return False
+        except OSError as exc:
+            logger.debug(f"Unable to inspect nginx service state: {exc}")
+            return False
+        return completed.returncode == 0
+
+    def stop(self):
+        self._run_required(
+            ["systemctl", "stop", "nginx"],
+            "Failed to stop nginx before ACME issuance.",
+        )
+
+    def start(self):
+        self._run_required(
+            ["systemctl", "start", "nginx"],
+            "Failed to start nginx after ACME issuance.",
+        )
+
+    def _run_required(self, command: list[str], message: str):
+        try:
+            completed = self.runner(command)
+        except FileNotFoundError as exc:
+            raise CertificateToolError(message) from exc
+        except OSError as exc:
+            raise CertificateToolError(message) from exc
+
+        if completed.returncode != 0:
+            error = CertificateManager._sanitize_error(
+                completed.stderr or completed.stdout
+            )
+            if error:
+                message = f"{message} {error}"
+            raise CertificateToolError(message)
+
+    @staticmethod
+    def _run_systemctl(command: list[str]):
+        return subprocess.run(
+            command,
+            shell=False,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
 
 
 def normalize_domain(domain: str) -> str:
@@ -111,6 +165,7 @@ class CertificateManager:
         renew_before_days: int = ACME_RENEW_BEFORE_DAYS,
         runner=None,
         port_checker=None,
+        nginx_controller=None,
     ):
         self.storage_dir = Path(storage_dir)
         self.acme_path = acme_path
@@ -118,6 +173,7 @@ class CertificateManager:
         self.renew_before = timedelta(days=renew_before_days)
         self.runner = runner or self._run_command
         self.port_checker = port_checker or self._check_port_80
+        self.nginx_controller = nginx_controller or NginxController()
         self._locks = {}
         self._locks_guard = threading.Lock()
         self._http_lock = threading.Lock()
@@ -157,6 +213,19 @@ class CertificateManager:
             return self._load_and_validate(
                 domain, certificate_path, private_key_path
             )
+
+    def import_certificate(
+        self,
+        domain: str,
+        certificate_file: str,
+        key_file: str,
+    ) -> dict:
+        domain = normalize_domain(domain)
+        certificate_path = self._validate_import_path(
+            certificate_file, "Certificate file"
+        )
+        private_key_path = self._validate_import_path(key_file, "Private key file")
+        return self._load_and_validate(domain, certificate_path, private_key_path)
 
     def _domain_lock(self, domain: str, staging: bool):
         key = (domain, staging)
@@ -213,21 +282,37 @@ class CertificateManager:
             temporary_key = temporary_dir / "private_key.pem"
 
             with self._http_lock:
-                self.port_checker()
-                self.runner(issue_command, self.timeout)
-                self.runner(
-                    [
-                        *common,
-                        "--install-cert",
-                        "-d",
-                        domain,
-                        "--key-file",
-                        str(temporary_key),
-                        "--fullchain-file",
-                        str(temporary_certificate),
-                    ],
-                    self.timeout,
-                )
+                nginx_was_active = self.nginx_controller.is_active()
+                issuance_failed = False
+                try:
+                    if nginx_was_active:
+                        self.nginx_controller.stop()
+                    self.port_checker()
+                    self.runner(issue_command, self.timeout)
+                    self.runner(
+                        [
+                            *common,
+                            "--install-cert",
+                            "-d",
+                            domain,
+                            "--key-file",
+                            str(temporary_key),
+                            "--fullchain-file",
+                            str(temporary_certificate),
+                        ],
+                        self.timeout,
+                    )
+                except Exception:
+                    issuance_failed = True
+                    raise
+                finally:
+                    if nginx_was_active:
+                        try:
+                            self.nginx_controller.start()
+                        except CertificateServiceError as exc:
+                            logger.error(str(exc))
+                            if not issuance_failed:
+                                raise
 
             result = self._load_and_validate(
                 domain, temporary_certificate, temporary_key
@@ -306,8 +391,26 @@ class CertificateManager:
             "domain": domain,
             "certificate": certificate_pem.decode("utf-8"),
             "private_key": private_key_pem.decode("utf-8"),
+            "certificate_file": str(certificate_path),
+            "key_file": str(private_key_path),
             "expires_at": not_after.isoformat().replace("+00:00", "Z"),
         }
+
+    @staticmethod
+    def _validate_import_path(value: str, label: str) -> Path:
+        if not isinstance(value, str) or not value.strip():
+            raise CertificateInputError(f"{label} is required.")
+
+        path = Path(value)
+        if not path.is_absolute():
+            raise CertificateInputError(f"{label} must be an absolute path.")
+        if not path.exists():
+            raise CertificateInputError(f"{label} does not exist.")
+        if not path.is_file():
+            raise CertificateInputError(f"{label} must be a regular file.")
+        if not os.access(path, os.R_OK):
+            raise CertificateInputError(f"{label} is not readable.")
+        return path
 
     def _renewal_due(self, expires_at: str) -> bool:
         expiration = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))

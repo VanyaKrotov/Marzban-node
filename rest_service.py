@@ -57,6 +57,11 @@ class Service(object):
             methods=["POST"]
         )
         self.router.add_api_route(
+            "/certificates/import",
+            self.import_certificate,
+            methods=["POST"]
+        )
+        self.router.add_api_route(
             "/geo-resources",
             self.list_geo_resources,
             methods=["POST"]
@@ -258,6 +263,27 @@ class Service(object):
                 email=email,
                 staging=staging,
                 force=force,
+            )
+        except CertificateServiceError as exc:
+            raise HTTPException(
+                status_code=exc.status_code,
+                detail=str(exc),
+            ) from exc
+
+    def import_certificate(
+        self,
+        session_id: UUID = Body(embed=True),
+        domain: str = Body(embed=True),
+        certificate_file: str = Body(embed=True),
+        key_file: str = Body(embed=True),
+    ):
+        self.match_session_id(session_id)
+
+        try:
+            return certificate_manager.import_certificate(
+                domain=domain,
+                certificate_file=certificate_file,
+                key_file=key_file,
             )
         except CertificateServiceError as exc:
             raise HTTPException(

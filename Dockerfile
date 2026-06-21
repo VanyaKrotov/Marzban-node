@@ -10,7 +10,7 @@ WORKDIR /code
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends build-essential curl unzip gcc python3-dev libpq-dev \
-    && curl -fsSL https://raw.githubusercontent.com/VanyaKrotov/Marzban/master/scripts/install_latest_xray.sh | bash \
+    && curl -fsSL https://raw.githubusercontent.com/VanyaKrotov/MarzbanNext/master/scripts/install_latest_xray.sh | bash \
     && curl -fsSL "https://raw.githubusercontent.com/acmesh-official/acme.sh/${ACME_SH_VERSION}/acme.sh" \
         -o /usr/local/bin/acme.sh \
     && chmod 0755 /usr/local/bin/acme.sh \

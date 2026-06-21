@@ -59,8 +59,27 @@ class FakeAcme:
             Path(command[key_index]).write_bytes(key)
 
 
+class FakeNginx:
+    def __init__(self, active=False, fail_start=False):
+        self.active = active
+        self.fail_start = fail_start
+        self.calls = []
+
+    def is_active(self):
+        self.calls.append("is_active")
+        return self.active
+
+    def stop(self):
+        self.calls.append("stop")
+
+    def start(self):
+        self.calls.append("start")
+        if self.fail_start:
+            raise CertificateToolError("Failed to start nginx after ACME issuance.")
+
+
 class CertificateManagerTest(unittest.TestCase):
-    def make_manager(self, runner=None, renew_before_days=30):
+    def make_manager(self, runner=None, renew_before_days=30, nginx_controller=None):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         return CertificateManager(
@@ -70,6 +89,7 @@ class CertificateManagerTest(unittest.TestCase):
             renew_before_days=renew_before_days,
             runner=runner or FakeAcme(),
             port_checker=lambda: None,
+            nginx_controller=nginx_controller or FakeNginx(),
         )
 
     def test_domain_validation_rejects_unsafe_values(self):
@@ -97,11 +117,93 @@ class CertificateManagerTest(unittest.TestCase):
         self.assertEqual(result["domain"], "node.example.com")
         self.assertIn("BEGIN CERTIFICATE", result["certificate"])
         self.assertIn("BEGIN PRIVATE KEY", result["private_key"])
+        self.assertTrue(result["certificate_file"].endswith("fullchain.pem"))
+        self.assertTrue(result["key_file"].endswith("private_key.pem"))
         key_path = Path(self.tmp.name) / "node.example.com" / "production" / "private_key.pem"
         if os.name != "nt":
             self.assertEqual(os.stat(key_path).st_mode & 0o777, 0o600)
             self.assertEqual(os.stat(key_path.parent).st_mode & 0o777, 0o700)
         self.assertEqual(len(runner.commands), 2)
+
+    def test_import_rejects_relative_certificate_and_key_paths(self):
+        manager = self.make_manager()
+
+        with self.assertRaises(CertificateInputError):
+            manager.import_certificate(
+                "node.example.com",
+                "fullchain.pem",
+                str(Path(self.tmp.name) / "private_key.pem"),
+            )
+        with self.assertRaises(CertificateInputError):
+            manager.import_certificate(
+                "node.example.com",
+                str(Path(self.tmp.name) / "fullchain.pem"),
+                "private_key.pem",
+            )
+
+    def test_import_rejects_missing_files(self):
+        manager = self.make_manager()
+
+        with self.assertRaises(CertificateInputError):
+            manager.import_certificate(
+                "node.example.com",
+                str(Path(self.tmp.name) / "missing-fullchain.pem"),
+                str(Path(self.tmp.name) / "missing-key.pem"),
+            )
+
+    @unittest.skipIf(os.name == "nt", "POSIX chmod read checks are not portable on Windows")
+    def test_import_rejects_unreadable_files(self):
+        manager = self.make_manager()
+        cert, key = generate_pair("node.example.com")
+        cert_path = Path(self.tmp.name) / "fullchain.pem"
+        key_path = Path(self.tmp.name) / "private_key.pem"
+        cert_path.write_bytes(cert)
+        key_path.write_bytes(key)
+        key_path.chmod(0)
+        self.addCleanup(lambda: key_path.chmod(0o600))
+
+        with self.assertRaises(CertificateInputError):
+            manager.import_certificate(
+                "node.example.com",
+                str(cert_path),
+                str(key_path),
+            )
+
+    def test_import_accepts_matching_certificate_and_key(self):
+        manager = self.make_manager()
+        cert, key = generate_pair("node.example.com")
+        cert_path = Path(self.tmp.name) / "fullchain.pem"
+        key_path = Path(self.tmp.name) / "privkey.pem"
+        cert_path.write_bytes(cert)
+        key_path.write_bytes(key)
+
+        result = manager.import_certificate(
+            "node.example.com",
+            str(cert_path),
+            str(key_path),
+        )
+
+        self.assertEqual(result["certificate"], cert.decode("utf-8"))
+        self.assertEqual(result["private_key"], key.decode("utf-8"))
+        self.assertEqual(result["certificate_file"], str(cert_path))
+        self.assertEqual(result["key_file"], str(key_path))
+        self.assertTrue(result["expires_at"].endswith("Z"))
+
+    def test_import_rejects_key_that_does_not_match_certificate(self):
+        manager = self.make_manager()
+        cert, _ = generate_pair("node.example.com")
+        _, key = generate_pair("node.example.com")
+        cert_path = Path(self.tmp.name) / "fullchain.pem"
+        key_path = Path(self.tmp.name) / "privkey.pem"
+        cert_path.write_bytes(cert)
+        key_path.write_bytes(key)
+
+        with self.assertRaises(CertificateToolError):
+            manager.import_certificate(
+                "node.example.com",
+                str(cert_path),
+                str(key_path),
+            )
 
     def test_reuses_existing_valid_certificate(self):
         runner = FakeAcme()
@@ -228,6 +330,45 @@ class CertificateManagerTest(unittest.TestCase):
 
         with self.assertRaises(CertificateToolError):
             manager.issue_certificate("node.example.com")
+
+    def test_issue_stops_and_starts_nginx_when_active(self):
+        nginx = FakeNginx(active=True)
+        manager = self.make_manager(nginx_controller=nginx)
+
+        manager.issue_certificate("node.example.com")
+
+        self.assertEqual(nginx.calls, ["is_active", "stop", "start"])
+
+    def test_issue_restarts_nginx_after_failed_issuance_when_active(self):
+        nginx = FakeNginx(active=True)
+
+        def failing_runner(command, timeout):
+            if "--issue" in command:
+                raise CertificateToolError("ACME operation failed.")
+
+        manager = self.make_manager(runner=failing_runner, nginx_controller=nginx)
+
+        with self.assertRaises(CertificateToolError):
+            manager.issue_certificate("node.example.com")
+        self.assertEqual(nginx.calls, ["is_active", "stop", "start"])
+
+    def test_issue_does_not_start_nginx_when_it_was_not_active(self):
+        nginx = FakeNginx(active=False)
+        manager = self.make_manager(nginx_controller=nginx)
+
+        manager.issue_certificate("node.example.com")
+
+        self.assertEqual(nginx.calls, ["is_active"])
+
+    def test_issue_reports_nginx_restart_failure_after_successful_issuance(self):
+        nginx = FakeNginx(active=True, fail_start=True)
+        manager = self.make_manager(nginx_controller=nginx)
+
+        with self.assertRaises(CertificateToolError) as ctx:
+            manager.issue_certificate("node.example.com")
+
+        self.assertIn("Failed to start nginx", str(ctx.exception))
+        self.assertEqual(nginx.calls, ["is_active", "stop", "start"])
 
 
 @unittest.skipUnless(
