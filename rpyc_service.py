@@ -1,4 +1,6 @@
 import time
+import json
+import threading
 from socket import socket
 from threading import Thread
 
@@ -8,6 +10,7 @@ from certificate_service import certificate_manager
 from config import XRAY_ASSETS_PATH, XRAY_EXECUTABLE_PATH
 from geo_resource_service import geo_resource_manager
 from logger import logger
+from static_log_service import StaticLogError, static_log_manager
 from xray import XRayConfig, XRayCore
 
 
@@ -47,6 +50,10 @@ class XrayService(rpyc.Service):
     def __init__(self):
         self.core = None
         self.connection = None
+        self.config = None
+        self.log_settings = None
+        self._rotation_timer = None
+        self._rotation_lock = threading.Lock()
 
     def on_connect(self, conn):
         if self.connection:
@@ -75,14 +82,15 @@ class XrayService(rpyc.Service):
 
             self.core = None
             self.connection = None
+            self._cancel_log_rotation()
 
     @rpyc.exposed
-    def start(self, config: str):
+    def start(self, config: str, log_settings: dict | None = None):
         if self.core is not None:
             self.stop()
 
         try:
-            config = XRayConfig(config, self.connection.peer)
+            config = self._configure_static_logs(XRayConfig(config, self.connection.peer), log_settings)
             self.core = XRayCore(executable_path=XRAY_EXECUTABLE_PATH,
                                  assets_path=XRAY_ASSETS_PATH)
 
@@ -111,12 +119,14 @@ class XrayService(rpyc.Service):
                     "Peer doesn't have on_stop function on it's service, skipped")
 
             self.core.start(config)
+            self._schedule_log_rotation()
         except Exception as exc:
             logger.error(exc)
             raise exc
 
     @rpyc.exposed
     def stop(self):
+        self._cancel_log_rotation()
         if self.core:
             try:
                 self.core.stop()
@@ -125,9 +135,10 @@ class XrayService(rpyc.Service):
         self.core = None
 
     @rpyc.exposed
-    def restart(self, config: str):
-        config = XRayConfig(config, self.connection.peer)
+    def restart(self, config: str, log_settings: dict | None = None):
+        config = self._configure_static_logs(XRayConfig(config, self.connection.peer), log_settings)
         self.core.restart(config)
+        self._schedule_log_rotation()
 
     @rpyc.exposed
     def fetch_xray_version(self):
@@ -135,6 +146,63 @@ class XrayService(rpyc.Service):
             raise ProcessLookupError("Xray has not been started")
 
         return self.core.version
+
+    @rpyc.exposed
+    def list_static_logs(self):
+        self._require_connection()
+        return self._call_static_log(static_log_manager.list_files, self.log_settings)
+
+    @rpyc.exposed
+    def download_static_log(self, log_type: str, filename: str):
+        self._require_connection()
+        try:
+            return static_log_manager.iter_file(log_type, filename)
+        except StaticLogError as exc:
+            raise ValueError(exc.detail) from exc
+
+    @rpyc.exposed
+    def delete_static_log(self, log_type: str, filename: str):
+        self._require_connection()
+        return self._call_static_log(static_log_manager.delete_file, log_type, filename, self.log_settings)
+
+    def _configure_static_logs(self, config: XRayConfig, log_settings: dict | None) -> XRayConfig:
+        self.log_settings = static_log_manager.normalize_settings(log_settings)
+        self.config = static_log_manager.prepare_config(config, self.log_settings)
+        return XRayConfig(json.dumps(self.config), self.connection.peer)
+
+    def _cancel_log_rotation(self):
+        if self._rotation_timer:
+            self._rotation_timer.cancel()
+            self._rotation_timer = None
+
+    def _schedule_log_rotation(self):
+        self._cancel_log_rotation()
+        if not self.log_settings:
+            return
+        now = time.time()
+        next_midnight = ((int(now) // 86400) + 1) * 86400
+        self._rotation_timer = threading.Timer(next_midnight - now, self._rotate_static_logs)
+        self._rotation_timer.daemon = True
+        self._rotation_timer.start()
+
+    def _rotate_static_logs(self):
+        with self._rotation_lock:
+            try:
+                if self.config and self.log_settings:
+                    self.config = static_log_manager.prepare_config(self.config, self.log_settings)
+                    if static_log_manager.enabled_types(self.log_settings) and self.core and self.core.started:
+                        self.core.restart(XRayConfig(json.dumps(self.config), self.connection.peer))
+            except Exception as exc:
+                logger.error(f"Failed to rotate static logs: {exc}")
+            finally:
+                self._schedule_log_rotation()
+
+    @staticmethod
+    def _call_static_log(operation, *args):
+        try:
+            return operation(*args)
+        except StaticLogError as exc:
+            raise ValueError(exc.detail) from exc
 
     @rpyc.exposed
     def issue_certificate(

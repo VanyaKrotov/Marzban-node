@@ -1,19 +1,21 @@
 import asyncio
 import json
 import time
+import threading
 from uuid import UUID, uuid4
 
 from fastapi import (APIRouter, Body, FastAPI, HTTPException, Request,
                      WebSocket, status)
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.websockets import WebSocketDisconnect
 
 from certificate_service import (CertificateServiceError, certificate_manager)
 from config import XRAY_ASSETS_PATH, XRAY_EXECUTABLE_PATH
 from geo_resource_service import (GeoResourceError, geo_resource_manager)
 from logger import logger
+from static_log_service import StaticLogError, static_log_manager
 from xray import XRayConfig, XRayCore
 
 app = FastAPI()
@@ -43,6 +45,9 @@ class Service(object):
         )
         self.core_version = self.core.get_version()
         self.config = None
+        self.log_settings = None
+        self._rotation_timer = None
+        self._rotation_lock = threading.Lock()
 
         self.router.add_api_route("/", self.base, methods=["POST"])
         self.router.add_api_route("/ping", self.ping, methods=["POST"])
@@ -86,6 +91,9 @@ class Service(object):
             self.delete_geo_resources,
             methods=["POST"]
         )
+        self.router.add_api_route("/static-logs", self.list_static_logs, methods=["POST"])
+        self.router.add_api_route("/static-logs/download", self.download_static_log, methods=["POST"])
+        self.router.add_api_route("/static-logs/delete", self.delete_static_log, methods=["POST"])
 
         self.router.add_websocket_route("/logs", self.logs)
 
@@ -129,6 +137,7 @@ class Service(object):
         )
 
     def disconnect(self):
+        self._cancel_log_rotation()
         if self.connected:
             logger.info(f'{self.client_ip} disconnected, Session ID = "{self.session_id}".')
 
@@ -148,11 +157,18 @@ class Service(object):
         self.match_session_id(session_id)
         return {}
 
-    def start(self, session_id: UUID = Body(embed=True), config: str = Body(embed=True)):
+    def start(
+        self,
+        session_id: UUID = Body(embed=True),
+        config: str = Body(embed=True),
+        log_settings: dict | None = Body(default=None, embed=True),
+    ):
         self.match_session_id(session_id)
 
         try:
-            config = XRayConfig(config, self.client_ip)
+            config = self._configure_static_logs(XRayConfig(config, self.client_ip), log_settings)
+        except StaticLogError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
         except json.decoder.JSONDecodeError as exc:
             raise HTTPException(
                 status_code=422,
@@ -190,10 +206,12 @@ class Service(object):
                 detail=last_log
             )
 
+        self._schedule_log_rotation()
         return self.response()
 
     def stop(self, session_id: UUID = Body(embed=True)):
         self.match_session_id(session_id)
+        self._cancel_log_rotation()
 
         try:
             self.core.stop()
@@ -203,11 +221,18 @@ class Service(object):
 
         return self.response()
 
-    def restart(self, session_id: UUID = Body(embed=True), config: str = Body(embed=True)):
+    def restart(
+        self,
+        session_id: UUID = Body(embed=True),
+        config: str = Body(embed=True),
+        log_settings: dict | None = Body(default=None, embed=True),
+    ):
         self.match_session_id(session_id)
 
         try:
-            config = XRayConfig(config, self.client_ip)
+            config = self._configure_static_logs(XRayConfig(config, self.client_ip), log_settings)
+        except StaticLogError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
         except json.decoder.JSONDecodeError as exc:
             raise HTTPException(
                 status_code=422,
@@ -245,7 +270,78 @@ class Service(object):
                 detail=last_log
             )
 
+        self._schedule_log_rotation()
         return self.response()
+
+    def list_static_logs(self, session_id: UUID = Body(embed=True)):
+        self.match_session_id(session_id)
+        return self._call_static_log(static_log_manager.list_files, self.log_settings)
+
+    def download_static_log(
+        self,
+        session_id: UUID = Body(embed=True),
+        log_type: str = Body(embed=True),
+        filename: str = Body(embed=True),
+    ):
+        self.match_session_id(session_id)
+        try:
+            return StreamingResponse(
+                static_log_manager.iter_file(log_type, filename),
+                media_type="text/plain; charset=utf-8",
+                headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+            )
+        except StaticLogError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+
+    def delete_static_log(
+        self,
+        session_id: UUID = Body(embed=True),
+        log_type: str = Body(embed=True),
+        filename: str = Body(embed=True),
+    ):
+        self.match_session_id(session_id)
+        return self._call_static_log(
+            static_log_manager.delete_file, log_type, filename, self.log_settings
+        )
+
+    def _configure_static_logs(self, config: XRayConfig, log_settings: dict | None) -> XRayConfig:
+        self.log_settings = static_log_manager.normalize_settings(log_settings)
+        self.config = static_log_manager.prepare_config(config, self.log_settings)
+        return XRayConfig(json.dumps(self.config), self.client_ip)
+
+    def _cancel_log_rotation(self):
+        if self._rotation_timer:
+            self._rotation_timer.cancel()
+            self._rotation_timer = None
+
+    def _schedule_log_rotation(self):
+        self._cancel_log_rotation()
+        if not self.log_settings:
+            return
+        now = time.time()
+        next_midnight = ((int(now) // 86400) + 1) * 86400
+        self._rotation_timer = threading.Timer(next_midnight - now, self._rotate_static_logs)
+        self._rotation_timer.daemon = True
+        self._rotation_timer.start()
+
+    def _rotate_static_logs(self):
+        with self._rotation_lock:
+            try:
+                if self.config and self.log_settings:
+                    self.config = static_log_manager.prepare_config(self.config, self.log_settings)
+                    if static_log_manager.enabled_types(self.log_settings) and self.core.started:
+                        self.core.restart(XRayConfig(json.dumps(self.config), self.client_ip))
+            except Exception as exc:
+                logger.error(f"Failed to rotate static logs: {exc}")
+            finally:
+                self._schedule_log_rotation()
+
+    @staticmethod
+    def _call_static_log(operation, *args):
+        try:
+            return operation(*args)
+        except StaticLogError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
 
     def issue_certificate(
         self,
