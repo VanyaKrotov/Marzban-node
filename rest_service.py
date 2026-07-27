@@ -4,7 +4,7 @@ import time
 import threading
 from uuid import UUID, uuid4
 
-from fastapi import (APIRouter, Body, FastAPI, HTTPException, Request,
+from fastapi import (APIRouter, Body, FastAPI, HTTPException, Query, Request,
                      WebSocket, status)
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
@@ -394,20 +394,28 @@ class Service(object):
         self.match_session_id(session_id)
         return self._call_geo_resource(geo_resource_manager.list_resources)
 
-    def upload_geo_resource(
+    async def upload_geo_resource(
         self,
-        session_id: UUID = Body(embed=True),
-        filename: str = Body(embed=True),
-        content: str = Body(embed=True),
-        overwrite: bool = Body(default=False, embed=True),
+        request: Request,
+        session_id: UUID = Query(...),
+        filename: str = Query(...),
+        overwrite: bool = Query(default=False),
     ):
         self.match_session_id(session_id)
-        return self._call_geo_resource(
-            geo_resource_manager.upload_resource,
-            filename=filename,
-            content=content,
-            overwrite=overwrite,
-        )
+        token = None
+        try:
+            token = geo_resource_manager.begin_upload(filename=filename, overwrite=overwrite)
+            async for chunk in request.stream():
+                geo_resource_manager.append_upload(token, chunk)
+            return geo_resource_manager.finish_upload(token)
+        except GeoResourceError as exc:
+            if token:
+                geo_resource_manager.abort_upload(token)
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        except Exception:
+            if token:
+                geo_resource_manager.abort_upload(token)
+            raise
 
     def download_geo_resource(
         self,
@@ -415,10 +423,14 @@ class Service(object):
         filename: str = Body(embed=True),
     ):
         self.match_session_id(session_id)
-        return self._call_geo_resource(
-            geo_resource_manager.download_resource,
-            filename=filename,
-        )
+        try:
+            return StreamingResponse(
+                geo_resource_manager.iter_resource(filename),
+                media_type="application/octet-stream",
+                headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+            )
+        except GeoResourceError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
     def rename_geo_resource(
         self,

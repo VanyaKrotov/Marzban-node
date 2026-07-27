@@ -54,6 +54,7 @@ class XrayService(rpyc.Service):
         self.log_settings = None
         self._rotation_timer = None
         self._rotation_lock = threading.Lock()
+        self._geo_uploads = set()
 
     def on_connect(self, conn):
         if self.connection:
@@ -83,6 +84,8 @@ class XrayService(rpyc.Service):
             self.core = None
             self.connection = None
             self._cancel_log_rotation()
+            geo_resource_manager.abort_uploads(list(self._geo_uploads))
+            self._geo_uploads.clear()
 
     @rpyc.exposed
     def start(self, config: str, log_settings: dict | None = None):
@@ -228,23 +231,41 @@ class XrayService(rpyc.Service):
         return geo_resource_manager.list_resources()
 
     @rpyc.exposed
-    def upload_geo_resource(
-        self,
-        filename: str,
-        content: str,
-        overwrite: bool = False,
-    ):
+    def begin_geo_resource_upload(self, filename: str, overwrite: bool = False):
         self._require_connection()
-        return geo_resource_manager.upload_resource(
-            filename=filename,
-            content=content,
-            overwrite=overwrite,
-        )
+        token = geo_resource_manager.begin_upload(filename=filename, overwrite=overwrite)
+        self._geo_uploads.add(token)
+        return token
+
+    @rpyc.exposed
+    def append_geo_resource_upload(self, token: str, chunk: bytes):
+        self._require_connection()
+        if token not in self._geo_uploads:
+            raise ValueError("Geo-resource upload does not belong to this connection.")
+        return geo_resource_manager.append_upload(token, chunk)
+
+    @rpyc.exposed
+    def finish_geo_resource_upload(self, token: str):
+        self._require_connection()
+        if token not in self._geo_uploads:
+            raise ValueError("Geo-resource upload does not belong to this connection.")
+        try:
+            return geo_resource_manager.finish_upload(token)
+        finally:
+            self._geo_uploads.discard(token)
+
+    @rpyc.exposed
+    def abort_geo_resource_upload(self, token: str):
+        if token in self._geo_uploads:
+            try:
+                geo_resource_manager.abort_upload(token)
+            finally:
+                self._geo_uploads.discard(token)
 
     @rpyc.exposed
     def download_geo_resource(self, filename: str):
         self._require_connection()
-        return geo_resource_manager.download_resource(filename)
+        return geo_resource_manager.iter_resource(filename)
 
     @rpyc.exposed
     def rename_geo_resource(
